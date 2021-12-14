@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+//import javax.lang.model.util.ElementScanner14;
+
 import org.hl7.fhir.r4.model.Address;
 import org.hl7.fhir.r4.model.AllergyIntolerance;
 import org.hl7.fhir.r4.model.AllergyIntolerance.AllergyIntoleranceCategory;
@@ -84,6 +86,7 @@ import org.hl7.fhir.r4.model.ImagingStudy.ImagingStudySeriesInstanceComponent;
 import org.hl7.fhir.r4.model.ImagingStudy.ImagingStudyStatus;
 import org.hl7.fhir.r4.model.Immunization.ImmunizationStatus;
 import org.hl7.fhir.r4.model.Immunization;
+import org.hl7.fhir.r4.model.InstantType;
 import org.hl7.fhir.r4.model.IntegerType;
 import org.hl7.fhir.r4.model.Location.LocationPositionComponent;
 import org.hl7.fhir.r4.model.Location.LocationStatus;
@@ -182,6 +185,8 @@ public class FhirR4 {
       Config.getAsBoolean("exporter.fhir.transaction_bundle");
   protected static boolean USE_US_CORE_IG =
       Config.getAsBoolean("exporter.fhir.use_us_core_ig");
+      protected static boolean USE_CARIN_BB_IG =
+      Config.getAsBoolean("exporter.fhir.use_carin_bb_ig");
 
   private static final String COUNTRY_CODE = Config.get("generate.geography.country_code");
 
@@ -1067,6 +1072,17 @@ public class FhirR4 {
                                            Person person, BundleEntryComponent claimEntry,
                                            Encounter encounter) {
     ExplanationOfBenefit eob = new ExplanationOfBenefit();
+
+
+    // TODO support multiple EoB types (random?), perhas should have a gerneal eob initialize function and random calls to different types? Need to be based on encounter type
+    if(USE_CARIN_BB_IG){
+      Meta meta = new Meta();
+      meta.addProfile(
+          "http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Professional-NonClinician|1.1.0");
+      //meta.setLastUpdatedElement(InstantType.now());
+      eob.setMeta(meta);
+    }
+
     eob.setStatus(org.hl7.fhir.r4.model.ExplanationOfBenefit.ExplanationOfBenefitStatus.ACTIVE);
     eob.setType(new CodeableConcept()
         .addCoding(new Coding()
@@ -1106,9 +1122,11 @@ public class FhirR4 {
 
     // Set References
     eob.setPatient(new Reference(personEntry.getFullUrl()));
-    if (USE_US_CORE_IG) {
+    if (USE_US_CORE_IG && !USE_CARIN_BB_IG) {
       eob.setFacility(encounterResource.getLocationFirstRep().getLocation());
     }
+
+    // CARIN BB IG does not utilize contained resources
 
     ServiceRequest referral = (ServiceRequest) new ServiceRequest()
         .setStatus(ServiceRequest.ServiceRequestStatus.COMPLETED)
@@ -1152,12 +1170,19 @@ public class FhirR4 {
       referral.setRequester(new Reference().setDisplay("Unknown"));
       referral.addPerformer(new Reference().setDisplay("Unknown"));
     }
-    eob.addContained(referral);
-    eob.setReferral(new Reference().setReference("#referral"));
+    if(!USE_CARIN_BB_IG)
+    {
+      eob.addContained(referral);
+      eob.setReferral(new Reference().setReference("#referral"));
+    }
+
+    // TODO CARIN BB Create separate Coverage resources 
+
 
     // Get the insurance info at the time that the encounter occurred.
     Payer payer = encounter.claim.payer;
     Coverage coverage = new Coverage();
+    
     coverage.setId("coverage");
     coverage.setStatus(CoverageStatus.ACTIVE);
     coverage.setType(new CodeableConcept().setText(payer.getName()));
@@ -1169,6 +1194,7 @@ public class FhirR4 {
     insuranceComponent.setFocal(true);
     insuranceComponent.setCoverage(new Reference("#coverage").setDisplay(payer.getName()));
     eob.addInsurance(insuranceComponent);
+    
     eob.setInsurer(new Reference().setDisplay(payer.getName()));
 
     org.hl7.fhir.r4.model.Claim claim =
@@ -1188,7 +1214,24 @@ public class FhirR4 {
     for (org.hl7.fhir.r4.model.Claim.DiagnosisComponent claimDiagnosis : claim.getDiagnosis()) {
       ExplanationOfBenefit.DiagnosisComponent diagnosisComponent =
           new ExplanationOfBenefit.DiagnosisComponent();
-      diagnosisComponent.setDiagnosis(claimDiagnosis.getDiagnosis());
+      
+      if(!USE_CARIN_BB_IG){
+        diagnosisComponent.setDiagnosis(claimDiagnosis.getDiagnosis());
+      }
+      else{
+        // CARIN expects
+        //diagnosisComponent.getDiagnosisCodeableConcept() = claimDiagnosis.getDiagnosis();
+        
+        //diagnosisComponent.setDiagnosis(claimDiagnosis.getDiagnosis());
+        // TODO. Diagnosis required. CARIN BB EoB profiles that require a diagnosis require a diagnosisCodeableConcept. That will need to be retrieved from the Condition and place inside the EoB
+        diagnosisComponent.setDiagnosis(claimDiagnosis.getDiagnosis());
+      }
+
+      // testing with Jay
+      //diagnosisComponent.setDiagnosis(mapCodeToCodeableConcept(encounter.conditions.get(0).codes(0), SNOMED_URI))
+      // instead of simply getting the first condition, loop through the bundle to find a condition that matches the id.
+
+      
       diagnosisComponent.getType().add(new CodeableConcept()
           .addCoding(new Coding()
               .setCode("principal")
